@@ -11,7 +11,53 @@ const tempDir = await mkdtemp(join(tmpdir(), "kakinada-plots-test-"));
 const dataDir = join(tempDir, "data");
 const uploadsDir = join(tempDir, "uploads");
 const password = "test-password-for-kakinada";
+const ownerEmail = "vjvijay2025@gmail.com";
 const secret = "test-session-secret-0123456789-abcdefghijklmnopqrstuv";
+const smtpMessages = [];
+let smtpBuffer = "";
+let smtpData = false;
+let smtpMessage = [];
+const smtpServer = createServer((socket) => {
+  socket.setEncoding("utf8");
+  socket.write("220 test.local ESMTP ready\r\n");
+  socket.on("data", (chunk) => {
+    smtpBuffer += chunk;
+    let newline;
+    while ((newline = smtpBuffer.indexOf("\n")) >= 0) {
+      const line = smtpBuffer.slice(0, newline).replace(/\r$/, "");
+      smtpBuffer = smtpBuffer.slice(newline + 1);
+      if (smtpData) {
+        if (line === ".") {
+          smtpData = false;
+          smtpMessages.push(smtpMessage.join("\n"));
+          smtpMessage = [];
+          socket.write("250 2.0.0 queued\r\n");
+        } else smtpMessage.push(line.startsWith("..") ? line.slice(1) : line);
+      } else if (/^(EHLO|HELO) /i.test(line)) {
+        socket.write(
+          "250-test.local\r\n250-AUTH PLAIN LOGIN\r\n250 SIZE 80000000\r\n",
+        );
+      } else if (/^AUTH PLAIN /i.test(line))
+        socket.write("235 2.7.0 authenticated\r\n");
+      else if (/^AUTH LOGIN/i.test(line)) socket.write("334 VXNlcm5hbWU6\r\n");
+      else if (/^MAIL FROM:/i.test(line) || /^RCPT TO:/i.test(line))
+        socket.write("250 2.1.0 accepted\r\n");
+      else if (/^DATA$/i.test(line)) {
+        smtpData = true;
+        socket.write("354 end with dot\r\n");
+      } else if (/^RSET$/i.test(line)) socket.write("250 2.0.0 reset\r\n");
+      else if (/^QUIT$/i.test(line)) {
+        socket.write("221 2.0.0 bye\r\n");
+        socket.end();
+      } else if (line === "test-user" || line === "test-password")
+        socket.write("334 UGFzc3dvcmQ6\r\n");
+      else socket.write("250 2.0.0 ok\r\n");
+    }
+  });
+});
+smtpServer.listen(0, "127.0.0.1");
+await once(smtpServer, "listening");
+const smtpPort = smtpServer.address().port;
 const portServer = createServer();
 portServer.listen(0, "127.0.0.1");
 await once(portServer, "listening");
@@ -24,6 +70,13 @@ const server = spawn(process.execPath, ["server.mjs"], {
     ...process.env,
     OWNER_PASSWORD: password,
     SESSION_SECRET: secret,
+    OWNER_EMAIL: ownerEmail,
+    SMTP_HOST: "127.0.0.1",
+    SMTP_PORT: String(smtpPort),
+    SMTP_SECURE: "false",
+    SMTP_USER: "test-user",
+    SMTP_PASSWORD: "test-password",
+    MAIL_FROM: "Kakinada Test <sender@test.local>",
     PORT: String(port),
     DATA_DIR: dataDir,
     UPLOADS_DIR: uploadsDir,
@@ -49,6 +102,8 @@ before(waitReady);
 after(async () => {
   server.kill();
   await once(server, "exit").catch(() => {});
+  smtpServer.close();
+  await once(smtpServer, "close").catch(() => {});
   await rm(tempDir, { recursive: true, force: true });
 });
 
@@ -182,6 +237,20 @@ test("owner can add and edit a plot; unauthenticated edits are rejected", async 
         item.id === listing.id && item.title === "Updated Kakinada Plot",
     ),
   );
+  const underMinimum = await request("/api/owner/listings", {
+    method: "POST",
+    cookie,
+    body: {
+      title: "Below Minimum",
+      area: "Turangi",
+      price: 0.5,
+      size: 100,
+      type: "Residential",
+      description: "This price is below one lakh.",
+      imageUrl: "https://example.com/low-price.jpg",
+    },
+  });
+  assert.equal(underMinimum.status, 400);
 });
 
 test("owner can upload an image and the public listing serves it", async () => {
@@ -206,4 +275,130 @@ test("owner can upload an image and the public listing serves it", async () => {
   const image = await fetch(`${baseUrl}${listing.image}`);
   assert.equal(image.status, 200);
   assert.match(image.headers.get("content-type"), /image\/png/);
+});
+
+test("owner can upload multiple photos and videos for one plot", async () => {
+  const cookie = await ownerCookie();
+  const png =
+    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jG+8AAAAASUVORK5CYII=";
+  const mp4Bytes = Buffer.alloc(20);
+  mp4Bytes.write("ftyp", 4, "ascii");
+  const mp4 = `data:video/mp4;base64,${mp4Bytes.toString("base64")}`;
+  const response = await request("/api/owner/listings", {
+    method: "POST",
+    cookie,
+    body: {
+      title: "Gallery Test Plot",
+      area: "Turangi",
+      price: 44,
+      size: 210,
+      type: "Residential",
+      description: "Listing with a photo and a video",
+      mediaFiles: [
+        { dataUrl: png, type: "image" },
+        { dataUrl: png, type: "image" },
+        { dataUrl: mp4, type: "video" },
+      ],
+    },
+  });
+  assert.equal(response.status, 201);
+  const { listing } = await response.json();
+  assert.equal(listing.media.length, 3);
+  assert.deepEqual(listing.media.map((item) => item.mediaType).sort(), [
+    "image",
+    "image",
+    "video",
+  ]);
+  const video = await fetch(
+    `${baseUrl}${listing.media.find((item) => item.mediaType === "video").url}`,
+  );
+  assert.equal(video.status, 200);
+  assert.match(video.headers.get("content-type"), /video\/mp4/);
+});
+
+test("owner can remove a post without deleting its booking history", async () => {
+  const cookie = await ownerCookie();
+  const listingResponse = await request("/api/owner/listings", {
+    method: "POST",
+    cookie,
+    body: {
+      title: "Delete Test Plot",
+      area: "Samalkot",
+      price: 21,
+      size: 180,
+      type: "Residential",
+      description: "Will be removed",
+      imageUrl: "https://example.com/delete.jpg",
+    },
+  });
+  const { listing } = await listingResponse.json();
+  const booking = await request("/api/bookings", {
+    method: "POST",
+    body: {
+      listingId: listing.id,
+      customerName: "Keep History",
+      phone: "9000000001",
+    },
+  });
+  assert.equal(booking.status, 201);
+  const deleted = await request(`/api/owner/listings/${listing.id}`, {
+    method: "DELETE",
+    cookie,
+  });
+  assert.equal(deleted.status, 200);
+  const publicListings = await (await request("/api/listings")).json();
+  assert.ok(!publicListings.listings.some((item) => item.id === listing.id));
+  const bookingResponse = await request("/api/owner/bookings", { cookie });
+  const { bookings } = await bookingResponse.json();
+  assert.ok(bookings.some((item) => item.customerName === "Keep History"));
+});
+
+test("owner can reset password using the emailed one-time code", async () => {
+  const priorSession = await ownerCookie();
+  const requestCode = await request("/api/owner/forgot-password", {
+    method: "POST",
+    body: { email: ownerEmail },
+  });
+  assert.equal(requestCode.status, 202);
+  const requestResult = await requestCode.json();
+  assert.ok(!JSON.stringify(requestResult).match(/\b\d{6}\b/));
+  assert.equal(smtpMessages.length, 1);
+  assert.match(smtpMessages[0], new RegExp(`To:.*${ownerEmail}`, "i"));
+  const match = smtpMessages[0].match(/reset code is[\s:=]+(\d{6})/i);
+  assert.ok(match, "email contains a six-digit reset code");
+  const code = match[1];
+
+  const wrongCode = await request("/api/owner/reset-password", {
+    method: "POST",
+    body: {
+      email: ownerEmail,
+      code: "000000" === code ? "000001" : "000000",
+      newPassword: "replacement-test-password",
+    },
+  });
+  assert.equal(wrongCode.status, 400);
+
+  const reset = await request("/api/owner/reset-password", {
+    method: "POST",
+    body: { email: ownerEmail, code, newPassword: "replacement-test-password" },
+  });
+  assert.equal(reset.status, 200);
+  assert.equal(
+    (await request("/api/owner/session", { cookie: priorSession })).status,
+    401,
+  );
+  assert.equal(
+    (await request("/api/owner/login", { method: "POST", body: { password } }))
+      .status,
+    401,
+  );
+  assert.equal(
+    (
+      await request("/api/owner/login", {
+        method: "POST",
+        body: { password: "replacement-test-password" },
+      })
+    ).status,
+    200,
+  );
 });

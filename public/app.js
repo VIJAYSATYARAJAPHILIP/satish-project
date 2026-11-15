@@ -1,12 +1,15 @@
 const $ = (selector) => document.querySelector(selector);
 const listingDialog = $("#listing-dialog");
 const loginDialog = $("#owner-login-dialog");
+const resetDialog = $("#forgot-password-dialog");
+const mediaViewer = $("#media-viewer-dialog");
 const listingRoot = $("#listings");
 let listings = [];
 let bookings = [];
 let currentBookingListing = null;
 let ownerUnlocked = false;
 let toastTimer;
+let editingMedia = [];
 
 const escapeHTML = (value) =>
   String(value ?? "").replace(
@@ -20,8 +23,12 @@ const escapeHTML = (value) =>
         "'": "&#39;",
       })[char],
   );
-const money = (lakhs) =>
-  `₹${Number(lakhs).toLocaleString("en-IN", { maximumFractionDigits: 2 })} lakh`;
+const money = (lakhs) => {
+  const amount = Number(lakhs);
+  return amount >= 100
+    ? `₹${(amount / 100).toLocaleString("en-IN", { maximumFractionDigits: 2 })} crore`
+    : `₹${amount.toLocaleString("en-IN", { maximumFractionDigits: 2 })} lakh`;
+};
 
 async function api(path, options = {}) {
   const headers = {
@@ -98,10 +105,22 @@ function renderListings() {
     return;
   }
   listingRoot.innerHTML = matches
-    .map(
-      (plot) => `
+    .map((plot) => {
+      const gallery =
+        Array.isArray(plot.media) && plot.media.length
+          ? plot.media
+          : [{ url: plot.image, mediaType: "image" }];
+      const thumbnails = gallery
+        .filter((item) => item.url !== plot.image)
+        .map(
+          (item) =>
+            `<button class="media-thumb ${item.mediaType === "video" ? "media-thumb-video" : ""}" type="button" data-view-media="${escapeHTML(item.url)}" data-media-type="${escapeHTML(item.mediaType)}" data-media-title="${escapeHTML(plot.title)}" aria-label="View ${item.mediaType} for ${escapeHTML(plot.title)}">${item.mediaType === "video" ? "" : `<img src="${escapeHTML(item.url)}" alt="Additional photo of ${escapeHTML(plot.title)}" loading="lazy">`}</button>`,
+        )
+        .join("");
+      return `
     <article class="card">
-      <div class="card-image"><img src="${escapeHTML(plot.image)}" alt="${escapeHTML(plot.title)}" loading="lazy"><span class="demo-badge">${escapeHTML(plot.status)}</span><span class="price-tag">${money(plot.price)}</span></div>
+      <div class="card-image"><button class="card-cover" type="button" data-view-media="${escapeHTML(plot.image)}" data-media-type="image" data-media-title="${escapeHTML(plot.title)}" aria-label="View photos of ${escapeHTML(plot.title)}"><img src="${escapeHTML(plot.image)}" alt="${escapeHTML(plot.title)}" loading="lazy"></button><span class="demo-badge">${escapeHTML(plot.status)}</span><span class="price-tag">${money(plot.price)}</span></div>
+      ${thumbnails ? `<div class="media-strip">${thumbnails}<span class="media-count">${gallery.length} photos/videos</span></div>` : ""}
       <div class="card-body">
         <div class="area">${escapeHTML(plot.area)}, Kakinada</div>
         <h3>${escapeHTML(plot.title)}</h3>
@@ -109,12 +128,40 @@ function renderListings() {
         <div class="card-meta"><span>${escapeHTML(plot.size)} sq. yd.</span><span>${escapeHTML(plot.type)}</span></div>
         <div class="card-footer"><small>${plot.status === "available" ? "Request a booking" : "Not currently available"}</small>${plot.status === "available" ? `<button class="button button-outline small-button" type="button" data-book="${escapeHTML(plot.id)}">Request booking</button>` : `<span class="status ${escapeHTML(plot.status)}">${escapeHTML(plot.status)}</span>`}</div>
       </div>
-    </article>`,
-    )
+    </article>`;
+    })
     .join("");
   listingRoot.querySelectorAll("[data-book]").forEach((button) => {
     button.addEventListener("click", () => openBooking(button.dataset.book));
   });
+  listingRoot.querySelectorAll("[data-view-media]").forEach((button) => {
+    button.addEventListener("click", () =>
+      openMediaViewer(
+        button.dataset.viewMedia,
+        button.dataset.mediaType,
+        button.dataset.mediaTitle,
+      ),
+    );
+  });
+}
+
+function openMediaViewer(url, type, title) {
+  const root = $("#media-viewer-content");
+  root.replaceChildren();
+  if (type === "video") {
+    const video = document.createElement("video");
+    video.src = url;
+    video.controls = true;
+    video.autoplay = true;
+    video.playsInline = true;
+    root.append(video);
+  } else {
+    const image = document.createElement("img");
+    image.src = url;
+    image.alt = title || "Plot photo";
+    root.append(image);
+  }
+  mediaViewer.showModal();
 }
 
 function openBooking(id) {
@@ -196,7 +243,7 @@ function renderOwnerListings() {
       <img src="${escapeHTML(plot.image)}" alt="${escapeHTML(plot.title)}" loading="lazy">
       <div><h3>${escapeHTML(plot.title)}</h3><p>${escapeHTML(plot.area)} · ${money(plot.price)} · ${escapeHTML(plot.size)} sq. yd.</p></div>
       <span class="status ${escapeHTML(plot.status)}">${escapeHTML(plot.status)}</span>
-      <div class="owner-row-actions"><button class="button button-outline small-button" type="button" data-edit="${escapeHTML(plot.id)}">Edit</button>${plot.status === "reserved" ? `<button class="button small-button" type="button" data-status="sold" data-id="${escapeHTML(plot.id)}">Mark sold</button><button class="button button-outline small-button" type="button" data-status="available" data-id="${escapeHTML(plot.id)}">Release</button>` : plot.status === "sold" ? `<button class="button button-outline small-button" type="button" data-status="available" data-id="${escapeHTML(plot.id)}">Mark available</button>` : ""}</div>
+      <div class="owner-row-actions"><button class="button button-outline small-button" type="button" data-edit="${escapeHTML(plot.id)}">Edit</button>${plot.status === "reserved" ? `<button class="button small-button" type="button" data-status="sold" data-id="${escapeHTML(plot.id)}">Mark sold</button><button class="button button-outline small-button" type="button" data-status="available" data-id="${escapeHTML(plot.id)}">Release</button>` : plot.status === "sold" ? `<button class="button button-outline small-button" type="button" data-status="available" data-id="${escapeHTML(plot.id)}">Mark available</button>` : ""}<button class="button danger-button small-button" type="button" data-delete="${escapeHTML(plot.id)}" aria-label="Delete ${escapeHTML(plot.title)}">Delete</button></div>
     </div>`,
         )
         .join("")
@@ -211,6 +258,13 @@ function renderOwnerListings() {
     .forEach((button) =>
       button.addEventListener("click", () =>
         setListingStatus(button.dataset.id, button.dataset.status),
+      ),
+    );
+  root
+    .querySelectorAll("[data-delete]")
+    .forEach((button) =>
+      button.addEventListener("click", () =>
+        deleteListing(button.dataset.delete),
       ),
     );
 }
@@ -241,6 +295,8 @@ function resetListingForm() {
   $("#save-listing").textContent = "Save plot";
   $("#cancel-edit").hidden = true;
   $("#image-preview").hidden = true;
+  $("#media-preview-list").replaceChildren();
+  editingMedia = [];
 }
 
 function editListing(id) {
@@ -256,9 +312,14 @@ function editListing(id) {
   $("#edit-image-url").value = plot.image.startsWith("https://")
     ? plot.image
     : "";
-  $("#edit-image-file").value = "";
+  $("#edit-image-files").value = "";
+  $("#edit-video-files").value = "";
+  editingMedia = Array.isArray(plot.media)
+    ? plot.media
+    : [{ url: plot.image, mediaType: "image" }];
   $("#image-preview").src = plot.image;
   $("#image-preview").hidden = false;
+  renderMediaPreview();
   $("#listing-form-title").textContent = "Edit plot";
   $("#save-listing").textContent = "Save changes";
   $("#cancel-edit").hidden = false;
@@ -270,23 +331,64 @@ function editListing(id) {
 
 async function fileAsDataUrl(file) {
   if (!file) return "";
-  if (file.size > 5 * 1024 * 1024)
-    throw new Error("Choose an image smaller than 5 MB.");
-  if (!["image/jpeg", "image/png", "image/webp"].includes(file.type))
-    throw new Error("Please choose a JPG, PNG, or WebP image.");
+  const imageTypes = ["image/jpeg", "image/png", "image/webp"];
+  const videoTypes = ["video/mp4", "video/webm", "video/quicktime"];
+  const isVideo = videoTypes.includes(file.type);
+  if (!imageTypes.includes(file.type) && !isVideo) {
+    throw new Error("Use JPG, PNG, WebP, MP4, WebM, or MOV files.");
+  }
+  if (file.size > (isVideo ? 20 : 5) * 1024 * 1024) {
+    throw new Error(
+      isVideo
+        ? "Videos must be smaller than 20 MB each."
+        : "Images must be smaller than 5 MB each.",
+    );
+  }
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
-    reader.onload = () => resolve(reader.result);
+    reader.onload = () =>
+      resolve({ dataUrl: reader.result, type: isVideo ? "video" : "image" });
     reader.onerror = () =>
       reject(new Error("Could not read the selected image."));
     reader.readAsDataURL(file);
   });
 }
 
+function renderMediaPreview() {
+  const root = $("#media-preview-list");
+  root.replaceChildren();
+  const files = [
+    ...Array.from($("#edit-image-files").files || []),
+    ...Array.from($("#edit-video-files").files || []),
+  ];
+  const pending = files.map((file) => ({
+    url: URL.createObjectURL(file),
+    mediaType: file.type.startsWith("video/") ? "video" : "image",
+    name: file.name,
+  }));
+  [...editingMedia, ...pending].forEach((item) => {
+    const tile = document.createElement("div");
+    tile.className = "media-preview-item";
+    const media =
+      item.mediaType === "video"
+        ? document.createElement("video")
+        : document.createElement("img");
+    media.src = item.url;
+    if (item.mediaType === "video") media.muted = true;
+    else media.alt = item.name || "Existing listing photo";
+    const label = document.createElement("span");
+    label.textContent = item.mediaType === "video" ? "Video" : "Photo";
+    tile.append(media, label);
+    root.append(tile);
+  });
+  if (files.length > 0) $("#image-preview").hidden = true;
+}
+
 async function saveListing(event) {
   event.preventDefault();
   const id = $("#edit-id").value;
-  const imageFile = $("#edit-image-file").files[0];
+  const imageFiles = Array.from($("#edit-image-files").files || []);
+  const videoFiles = Array.from($("#edit-video-files").files || []);
   const imageUrl = $("#edit-image-url").value.trim();
   const payload = {
     title: $("#edit-title").value.trim(),
@@ -298,9 +400,19 @@ async function saveListing(event) {
     imageUrl,
   };
   try {
-    if (imageFile) payload.imageData = await fileAsDataUrl(imageFile);
-    else if (!id && !imageUrl)
-      throw new Error("Upload a photo or enter an image URL.");
+    const selectedFiles = [...imageFiles, ...videoFiles];
+    if (editingMedia.length + selectedFiles.length > 8)
+      throw new Error(
+        "A listing can have up to 8 photos/videos. Start a new listing or contact support to replace existing media.",
+      );
+    if (
+      selectedFiles.reduce((sum, file) => sum + file.size, 0) >
+      55 * 1024 * 1024
+    )
+      throw new Error("Combined photo/video uploads must be under 55 MB.");
+    payload.mediaFiles = await Promise.all(selectedFiles.map(fileAsDataUrl));
+    if (!id && !imageUrl && imageFiles.length === 0)
+      throw new Error("Add at least one listing photo or enter an image URL.");
     await api(
       id
         ? `/api/owner/listings/${encodeURIComponent(id)}`
@@ -326,6 +438,26 @@ async function setListingStatus(id, status) {
     });
     await refreshOwnerData();
     notify(`Plot marked ${status}.`);
+  } catch (error) {
+    notify(error.message, true);
+  }
+}
+
+async function deleteListing(id) {
+  const plot = listings.find((item) => String(item.id) === String(id));
+  if (
+    !plot ||
+    !confirm(
+      `Remove “${plot.title}” from the customer listings? Booking history will be kept.`,
+    )
+  )
+    return;
+  try {
+    await api(`/api/owner/listings/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    });
+    await refreshOwnerData();
+    notify("Listing removed. Booking history was retained.");
   } catch (error) {
     notify(error.message, true);
   }
@@ -394,6 +526,83 @@ async function signIn(event) {
   }
 }
 
+function showForgotPassword() {
+  if (loginDialog.open) loginDialog.close();
+  $("#forgot-password-form").reset();
+  $("#reset-email-address").value = "vjvijay2025@gmail.com";
+  $("#forgot-password-error").textContent = "";
+  $("#reset-password-error").textContent = "";
+  $("#request-code-panel").hidden = false;
+  $("#verify-code-panel").hidden = true;
+  resetDialog.showModal();
+}
+
+async function requestPasswordCode(email) {
+  return api("/api/owner/forgot-password", {
+    method: "POST",
+    body: JSON.stringify({ email }),
+  });
+}
+
+async function sendResetCode(event) {
+  event.preventDefault();
+  const button = $("#forgot-password-form button[type=submit]");
+  const email = $("#reset-email-address").value.trim().toLowerCase();
+  button.disabled = true;
+  $("#forgot-password-error").textContent = "";
+  try {
+    const result = await requestPasswordCode(email);
+    $("#reset-email-value").value = email;
+    $("#reset-code-sent-message").textContent = result.message;
+    $("#request-code-panel").hidden = true;
+    $("#verify-code-panel").hidden = false;
+    $("#reset-code").focus();
+  } catch (error) {
+    $("#forgot-password-error").textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function resendResetCode() {
+  const button = $("#resend-code-button");
+  button.disabled = true;
+  $("#reset-password-error").textContent = "";
+  try {
+    const result = await requestPasswordCode($("#reset-email-value").value);
+    $("#reset-code-sent-message").textContent = result.message;
+  } catch (error) {
+    $("#reset-password-error").textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function resetOwnerPassword(event) {
+  event.preventDefault();
+  const button = $("#reset-password-form button[type=submit]");
+  button.disabled = true;
+  $("#reset-password-error").textContent = "";
+  try {
+    const result = await api("/api/owner/reset-password", {
+      method: "POST",
+      body: JSON.stringify({
+        email: $("#reset-email-value").value,
+        code: $("#reset-code").value.trim(),
+        newPassword: $("#new-owner-password").value,
+      }),
+    });
+    resetDialog.close();
+    $("#reset-password-form").reset();
+    loginDialog.showModal();
+    $("#login-error").textContent = result.message;
+  } catch (error) {
+    $("#reset-password-error").textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
+}
+
 async function signOut() {
   try {
     await api("/api/owner/logout", { method: "POST", body: "{}" });
@@ -418,20 +627,19 @@ $("#owner-tab").addEventListener("click", () =>
   openOwnerPage().catch((error) => notify(error.message, true)),
 );
 $("#owner-login-form").addEventListener("submit", signIn);
+$("#forgot-password-button").addEventListener("click", showForgotPassword);
+$("#forgot-password-form").addEventListener("submit", sendResetCode);
+$("#reset-password-form").addEventListener("submit", resetOwnerPassword);
+$("#resend-code-button").addEventListener("click", resendResetCode);
 $("#logout-button").addEventListener("click", signOut);
 $("#listing-form").addEventListener("submit", saveListing);
 $("#booking-form").addEventListener("submit", submitBooking);
 $("#cancel-edit").addEventListener("click", resetListingForm);
-$("#edit-image-file").addEventListener("change", () => {
-  const file = $("#edit-image-file").files[0];
-  if (!file) return;
-  const preview = $("#image-preview");
-  preview.src = URL.createObjectURL(file);
-  preview.hidden = false;
-});
+$("#edit-image-files").addEventListener("change", renderMediaPreview);
+$("#edit-video-files").addEventListener("change", renderMediaPreview);
 $("#edit-image-url").addEventListener("input", () => {
   const url = $("#edit-image-url").value.trim();
-  if (url && !$("#edit-image-file").files[0]) {
+  if (url && !$("#edit-image-files").files[0]) {
     $("#image-preview").src = url;
     $("#image-preview").hidden = false;
   }
@@ -439,11 +647,16 @@ $("#edit-image-url").addEventListener("input", () => {
 document.querySelectorAll("[data-close]").forEach((button) => {
   button.addEventListener("click", () => $(`#${button.dataset.close}`).close());
 });
-[listingDialog, loginDialog].forEach((dialog) =>
+[listingDialog, loginDialog, resetDialog, mediaViewer].forEach((dialog) =>
   dialog.addEventListener("click", (event) => {
     if (event.target === dialog) dialog.close();
   }),
 );
+$(".media-viewer-close").addEventListener("click", () => mediaViewer.close());
+mediaViewer.addEventListener("close", () => {
+  const video = $("#media-viewer-content video");
+  if (video) video.pause();
+});
 
 loadListings().catch((error) => {
   $("#result-count").textContent = "Could not load listings.";

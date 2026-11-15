@@ -63,7 +63,7 @@
           </div>
           <div class="stats">
             <div class="stat">
-              <strong>₹8L–₹70L+</strong><span>Indicative prices</span>
+              <strong>₹1L–₹1Cr+</strong><span>Indicative price range</span>
             </div>
             <div class="stat">
               <strong>Kakinada</strong><span>Local plot options</span>
@@ -110,6 +110,7 @@
                 <option value="15">Up to ₹15 lakh</option>
                 <option value="30">Up to ₹30 lakh</option>
                 <option value="50">Up to ₹50 lakh</option>
+                <option value="100">Up to ₹1 crore</option>
               </select>
             </div>
             <button class="button filter-submit" type="submit">
@@ -175,7 +176,17 @@
               request on any available plot and Satish Kumar can follow up.
             </p>
           </div>
-          <a class="button button-outline" href="#plots">Browse plots</a>
+          <div class="contact-actions">
+            <a
+              class="button whatsapp-button"
+              href="https://wa.me/919848154489?text=Hello%20Satish%20Kumar%2C%20I%27m%20interested%20in%20Kakinada%20plots."
+              target="_blank"
+              rel="noopener noreferrer"
+              aria-label="Message Satish Kumar on WhatsApp at 9848154489"
+              >WhatsApp Satish · 9848154489 <span aria-hidden="true">↗</span></a
+            >
+            <a class="button button-outline" href="#plots">Browse plots</a>
+          </div>
         </div>
       </section>
     </main>
@@ -214,7 +225,10 @@
           <div class="panel-heading">
             <div>
               <h2 id="listing-form-title">Add a plot</h2>
-              <p>Upload an image or provide a public HTTPS image URL.</p>
+              <p>
+                Add up to 8 listing photos/videos; each photo supports up to 5
+                MB and each video up to 20 MB.
+              </p>
             </div>
           </div>
           <form id="listing-form">
@@ -239,10 +253,13 @@
                   id="edit-price"
                   required
                   type="number"
-                  min="0.01"
+                  min="1"
                   max="100000"
                   step="0.01"
                 />
+                <span class="field-hint"
+                  >Enter prices in lakhs: 100 = ₹1 crore. Minimum ₹1 lakh.</span
+                >
               </div>
               <div class="field">
                 <label for="edit-size">Plot size (sq. yd.)</label
@@ -269,12 +286,27 @@
                 ><input id="edit-description" required maxlength="180" />
               </div>
               <div class="field">
-                <label for="edit-image-file">Upload a plot photo</label
+                <label for="edit-image-files">Upload listing photos</label
                 ><input
-                  id="edit-image-file"
+                  id="edit-image-files"
                   type="file"
+                  multiple
                   accept="image/jpeg,image/png,image/webp"
-                /><span class="field-hint">JPG, PNG or WebP, up to 5 MB.</span>
+                /><span class="field-hint"
+                  >Select multiple JPG, PNG or WebP images.</span
+                >
+              </div>
+              <div class="field">
+                <label for="edit-video-files">Upload listing videos</label
+                ><input
+                  id="edit-video-files"
+                  type="file"
+                  multiple
+                  accept="video/mp4,video/webm,video/quicktime"
+                />
+                <span class="field-hint"
+                  >MP4, WebM or MOV. Up to 20 MB per video.</span
+                >
               </div>
               <div class="field">
                 <label for="edit-image-url">Or image URL</label
@@ -291,6 +323,9 @@
                   alt="Selected plot photo preview"
                   hidden
                 />
+              </div>
+              <div class="field field-full">
+                <div class="media-preview-list" id="media-preview-list"></div>
               </div>
             </div>
             <div class="form-actions">
@@ -408,6 +443,23 @@
       </div>
     </dialog>
 
+    <dialog
+      id="media-viewer-dialog"
+      class="media-viewer"
+      aria-label="Listing photo or video"
+    >
+      <div class="media-viewer-inner">
+        <button
+          class="close-button media-viewer-close"
+          type="button"
+          aria-label="Close media"
+        >
+          ×
+        </button>
+        <div class="media-viewer-content" id="media-viewer-content"></div>
+      </div>
+    </dialog>
+
     <dialog id="owner-login-dialog" aria-labelledby="owner-login-title">
       <div class="modal-content">
         <div class="modal-top">
@@ -436,6 +488,9 @@
             />
           </div>
           <p class="login-error" id="login-error" aria-live="polite"></p>
+          <button class="text-button" id="forgot-password-button" type="button">
+            Forgot password?
+          </button>
           <div class="form-actions">
             <button
               class="button button-outline"
@@ -446,6 +501,111 @@
             ><button class="button" type="submit">Sign in</button>
           </div>
         </form>
+      </div>
+    </dialog>
+
+    <dialog id="forgot-password-dialog" aria-labelledby="forgot-password-title">
+      <div class="modal-content">
+        <div class="modal-top">
+          <div>
+            <h2 id="forgot-password-title">Reset owner password</h2>
+            <p id="reset-dialog-subtitle">
+              We’ll email a one-time verification code.
+            </p>
+          </div>
+          <button
+            class="close-button"
+            data-close="forgot-password-dialog"
+            type="button"
+            aria-label="Close"
+          >
+            ×
+          </button>
+        </div>
+        <section id="request-code-panel">
+          <form id="forgot-password-form">
+            <div class="field">
+              <label for="reset-email-address">Owner email</label
+              ><input
+                id="reset-email-address"
+                type="email"
+                required
+                autocomplete="email"
+                value="vjvijay2025@gmail.com"
+              />
+            </div>
+            <p
+              class="login-error"
+              id="forgot-password-error"
+              aria-live="polite"
+            ></p>
+            <p class="modal-help">
+              A six-digit code is sent to the configured owner email and expires
+              in 10 minutes.
+            </p>
+            <div class="form-actions">
+              <button
+                class="button button-outline"
+                data-close="forgot-password-dialog"
+                type="button"
+              >
+                Cancel</button
+              ><button class="button" type="submit">
+                Send verification code
+              </button>
+            </div>
+          </form>
+        </section>
+        <section id="verify-code-panel" hidden>
+          <p
+            class="reset-success"
+            id="reset-code-sent-message"
+            aria-live="polite"
+          ></p>
+          <form id="reset-password-form">
+            <input id="reset-email-value" type="hidden" />
+            <div class="field-grid">
+              <div class="field field-full">
+                <label for="reset-code">Six-digit verification code</label
+                ><input
+                  id="reset-code"
+                  type="text"
+                  inputmode="numeric"
+                  autocomplete="one-time-code"
+                  pattern="[0-9]{6}"
+                  minlength="6"
+                  maxlength="6"
+                  required
+                />
+              </div>
+              <div class="field field-full">
+                <label for="new-owner-password">New password</label
+                ><input
+                  id="new-owner-password"
+                  type="password"
+                  autocomplete="new-password"
+                  minlength="10"
+                  maxlength="256"
+                  required
+                /><span class="field-hint">Use at least 10 characters.</span>
+              </div>
+            </div>
+            <p
+              class="login-error"
+              id="reset-password-error"
+              aria-live="polite"
+            ></p>
+            <div class="form-actions">
+              <button
+                class="button button-outline"
+                id="resend-code-button"
+                type="button"
+              >
+                Send another code</button
+              ><button class="button" type="submit">Update password</button>
+            </div>
+          </form>
+        </section>
       </div>
     </dialog>
 

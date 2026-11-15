@@ -9,6 +9,7 @@ import { createServer } from "node:http";
 import { extname, join, normalize, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
+import nodemailer from "nodemailer";
 
 const ROOT = fileURLToPath(new URL(".", import.meta.url));
 try {
@@ -23,9 +24,16 @@ const UPLOADS_DIR = resolve(ROOT, process.env.UPLOADS_DIR || "uploads");
 const DB_PATH = join(DATA_DIR, "plots.sqlite");
 const PORT = Number(process.env.PORT || 3000);
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
-const MAX_JSON_BYTES = 7 * 1024 * 1024;
+const RESET_CODE_TTL_MS = 10 * 60 * 1000;
+const RESET_CODE_COOLDOWN_MS = 60 * 1000;
+const RESET_CODE_MAX_ATTEMPTS = 5;
+const MAX_JSON_BYTES = 80 * 1024 * 1024;
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
-const PASSWORD_SALT = "kakinada-plots-owner-password-v1";
+const MAX_VIDEO_BYTES = 20 * 1024 * 1024;
+const MAX_MEDIA_FILES = 8;
+const OWNER_EMAIL = (process.env.OWNER_EMAIL || "vjvijay2025@gmail.com")
+  .trim()
+  .toLowerCase();
 
 const ownerPassword = process.env.OWNER_PASSWORD;
 if (
@@ -48,8 +56,6 @@ if (
   );
   process.exit(1);
 }
-const configuredPasswordHash = scryptSync(ownerPassword, PASSWORD_SALT, 64);
-
 await mkdir(DATA_DIR, { recursive: true });
 await mkdir(UPLOADS_DIR, { recursive: true });
 
@@ -67,6 +73,7 @@ db.exec(`
     description TEXT NOT NULL,
     image TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'available' CHECK (status IN ('available', 'reserved', 'sold')),
+    archived INTEGER NOT NULL DEFAULT 0,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
   );
@@ -84,7 +91,47 @@ db.exec(`
     token_hash TEXT PRIMARY KEY,
     expires_at INTEGER NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS owner_credentials (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    password_salt TEXT NOT NULL,
+    password_hash TEXT NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS password_reset_codes (
+    email TEXT PRIMARY KEY,
+    code_hash TEXT NOT NULL,
+    expires_at INTEGER NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    sent_at INTEGER NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS listing_media (
+    id TEXT PRIMARY KEY,
+    listing_id TEXT NOT NULL REFERENCES listings(id) ON DELETE CASCADE,
+    url TEXT NOT NULL,
+    media_type TEXT NOT NULL CHECK (media_type IN ('image','video')),
+    position INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL
+  );
 `);
+
+if (
+  !db
+    .prepare("PRAGMA table_info(listings)")
+    .all()
+    .some((column) => column.name === "archived")
+) {
+  db.exec(
+    "ALTER TABLE listings ADD COLUMN archived INTEGER NOT NULL DEFAULT 0",
+  );
+}
+
+if (!db.prepare("SELECT id FROM owner_credentials WHERE id = 1").get()) {
+  const salt = randomBytes(32).toString("hex");
+  const passwordHash = scryptSync(ownerPassword, salt, 64).toString("hex");
+  db.prepare(
+    "INSERT INTO owner_credentials (id,password_salt,password_hash,updated_at) VALUES (1,?,?,?)",
+  ).run(salt, passwordHash, Date.now());
+}
 
 const starterListings = [
   [
@@ -159,6 +206,7 @@ if (db.prepare("SELECT COUNT(*) AS count FROM listings").get().count === 0) {
 db.prepare("DELETE FROM sessions WHERE expires_at <= ?").run(Date.now());
 
 const loginAttempts = new Map();
+const resetRequestAttempts = new Map();
 const mimeTypes = {
   ".html": "text/html; charset=utf-8",
   ".js": "text/javascript; charset=utf-8",
@@ -168,6 +216,9 @@ const mimeTypes = {
   ".jpg": "image/jpeg",
   ".jpeg": "image/jpeg",
   ".webp": "image/webp",
+  ".mp4": "video/mp4",
+  ".webm": "video/webm",
+  ".mov": "video/quicktime",
   ".ico": "image/x-icon",
 };
 
@@ -256,6 +307,47 @@ function cookieHeader(value, maxAge) {
   return `satish_session=${encodeURIComponent(value)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${maxAge}${secure}`;
 }
 
+function resetCodeHash(email, code) {
+  return createHmac("sha256", process.env.SESSION_SECRET)
+    .update(`owner-password-reset:${email}:${code}`)
+    .digest("hex");
+}
+
+function emailConfigured() {
+  return Boolean(
+    process.env.SMTP_HOST &&
+    process.env.SMTP_PORT &&
+    process.env.SMTP_USER &&
+    process.env.SMTP_PASSWORD &&
+    (process.env.MAIL_FROM || process.env.SMTP_USER),
+  );
+}
+
+async function sendPasswordResetEmail(email, code) {
+  if (!emailConfigured()) throw new Error("SMTP email settings are missing.");
+  const port = Number(process.env.SMTP_PORT);
+  const transporter = nodemailer.createTransport({
+    host: process.env.SMTP_HOST,
+    port,
+    secure: process.env.SMTP_SECURE === "true" || port === 465,
+    auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASSWORD },
+    connectionTimeout: 10000,
+    greetingTimeout: 10000,
+    socketTimeout: 15000,
+  });
+  try {
+    await transporter.sendMail({
+      from: process.env.MAIL_FROM || process.env.SMTP_USER,
+      to: email,
+      subject: "Your Kakinada Plots password reset code",
+      text: `Your owner password reset code is ${code}. It expires in 10 minutes. If you did not request this, ignore this email.`,
+      html: `<p>Your owner password reset code is:</p><p style="font-size:28px;font-weight:700;letter-spacing:6px">${code}</p><p>This code expires in 10 minutes. If you did not request it, ignore this email.</p>`,
+    });
+  } finally {
+    transporter.close();
+  }
+}
+
 function validText(value, maxLength) {
   return (
     typeof value === "string" &&
@@ -264,25 +356,111 @@ function validText(value, maxLength) {
   );
 }
 
-async function saveImage(dataUrl) {
-  if (typeof dataUrl !== "string")
-    throw Object.assign(new Error("Invalid image."), { status: 400 });
-  const match = dataUrl.match(
-    /^data:image\/(jpeg|png|webp);base64,([A-Za-z0-9+/=]+)$/,
+async function saveMediaFile(file) {
+  if (!file || typeof file.dataUrl !== "string")
+    throw Object.assign(new Error("Invalid uploaded media."), { status: 400 });
+  const match = file.dataUrl.match(
+    /^data:(image\/(?:jpeg|png|webp)|video\/(?:mp4|webm|quicktime));base64,([A-Za-z0-9+/=]+)$/,
   );
   if (!match)
-    throw Object.assign(new Error("Choose a JPG, PNG, or WebP image."), {
-      status: 400,
-    });
+    throw Object.assign(
+      new Error("Use JPG, PNG, WebP, MP4, WebM, or MOV files."),
+      { status: 400 },
+    );
+  const mimeType = match[1];
   const bytes = Buffer.from(match[2], "base64");
-  if (!bytes.length || bytes.length > MAX_IMAGE_BYTES)
-    throw Object.assign(new Error("Images must be smaller than 5 MB."), {
-      status: 413,
-    });
-  const extension = match[1] === "jpeg" ? ".jpg" : `.${match[1]}`;
+  const mediaType = mimeType.startsWith("video/") ? "video" : "image";
+  const maxBytes = mediaType === "video" ? MAX_VIDEO_BYTES : MAX_IMAGE_BYTES;
+  if (!bytes.length || bytes.length > maxBytes) {
+    throw Object.assign(
+      new Error(
+        mediaType === "video"
+          ? "Videos must be smaller than 20 MB each."
+          : "Images must be smaller than 5 MB each.",
+      ),
+      { status: 413 },
+    );
+  }
+  const validSignature =
+    mimeType === "image/png"
+      ? bytes
+          .subarray(0, 8)
+          .equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
+      : mimeType === "image/jpeg"
+        ? bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff
+        : mimeType === "image/webp"
+          ? bytes.toString("ascii", 0, 4) === "RIFF" &&
+            bytes.toString("ascii", 8, 12) === "WEBP"
+          : mimeType === "video/webm"
+            ? bytes.subarray(0, 4).equals(Buffer.from([0x1a, 0x45, 0xdf, 0xa3]))
+            : bytes.toString("ascii", 4, 8) === "ftyp";
+  if (!validSignature)
+    throw Object.assign(
+      new Error("The uploaded file content does not match its file type."),
+      { status: 400 },
+    );
+  const extension =
+    mimeType === "image/jpeg"
+      ? ".jpg"
+      : mimeType === "image/png"
+        ? ".png"
+        : mimeType === "image/webp"
+          ? ".webp"
+          : mimeType === "video/mp4"
+            ? ".mp4"
+            : mimeType === "video/webm"
+              ? ".webm"
+              : ".mov";
   const filename = `${randomBytes(16).toString("hex")}${extension}`;
   await writeFile(join(UPLOADS_DIR, filename), bytes, { flag: "wx" });
-  return `/uploads/${filename}`;
+  return { url: `/uploads/${filename}`, mediaType };
+}
+
+async function saveMediaFiles(body) {
+  const files = Array.isArray(body.mediaFiles) ? [...body.mediaFiles] : [];
+  if (body.imageData) files.unshift({ dataUrl: body.imageData });
+  if (files.length > MAX_MEDIA_FILES) {
+    throw Object.assign(
+      new Error(`Upload up to ${MAX_MEDIA_FILES} photos/videos per listing.`),
+      { status: 400 },
+    );
+  }
+  const encodedBytes = files.reduce((total, file) => {
+    const dataUrl = typeof file?.dataUrl === "string" ? file.dataUrl : "";
+    const comma = dataUrl.indexOf(",");
+    return (
+      total + (comma >= 0 ? Math.ceil((dataUrl.length - comma - 1) * 0.75) : 0)
+    );
+  }, 0);
+  if (encodedBytes > 55 * 1024 * 1024) {
+    throw Object.assign(
+      new Error("The combined photo/video upload must be under 55 MB."),
+      { status: 413 },
+    );
+  }
+  return Promise.all(files.map(saveMediaFile));
+}
+
+function saveListingMedia(listingId, mediaFiles, imageUrl, firstImageUrl = "") {
+  const items = [...mediaFiles];
+  if (imageUrl && !items.some((item) => item.url === imageUrl))
+    items.unshift({ url: imageUrl, mediaType: "image" });
+  if (firstImageUrl && !items.some((item) => item.url === firstImageUrl))
+    items.unshift({ url: firstImageUrl, mediaType: "image" });
+  const insert = db.prepare(
+    "INSERT INTO listing_media (id,listing_id,url,media_type,position,created_at) VALUES (?,?,?,?,?,?)",
+  );
+  const now = Date.now();
+  items.forEach((item, index) =>
+    insert.run(
+      randomBytes(12).toString("hex"),
+      listingId,
+      item.url,
+      item.mediaType,
+      index,
+      now,
+    ),
+  );
 }
 
 function listingInput(body) {
@@ -300,15 +478,18 @@ function listingInput(body) {
   }
   if (
     !Number.isFinite(price) ||
-    price <= 0 ||
+    price < 1 ||
     price > 100000 ||
     !Number.isFinite(size) ||
     size <= 0 ||
     size > 100000
   ) {
-    throw Object.assign(new Error("Enter a valid price and plot size."), {
-      status: 400,
-    });
+    throw Object.assign(
+      new Error("Enter a price of at least ₹1 lakh and a valid plot size."),
+      {
+        status: 400,
+      },
+    );
   }
   return {
     title: body.title.trim(),
@@ -321,11 +502,29 @@ function listingInput(body) {
 }
 
 function publicListings() {
-  return db
+  const listings = db
     .prepare(
-      "SELECT id,title,area,price,size,type,description,image,status FROM listings ORDER BY created_at DESC",
+      "SELECT id,title,area,price,size,type,description,image,status FROM listings WHERE archived=0 ORDER BY created_at DESC",
     )
     .all();
+  const media = db
+    .prepare(
+      "SELECT url,media_type AS mediaType,listing_id AS listingId FROM listing_media ORDER BY position,created_at",
+    )
+    .all();
+  const byListing = new Map();
+  for (const item of media) {
+    const list = byListing.get(item.listingId) || [];
+    list.push({ url: item.url, mediaType: item.mediaType });
+    byListing.set(item.listingId, list);
+  }
+  return listings.map((listing) => {
+    const gallery = byListing.get(listing.id) || [];
+    if (listing.image && !gallery.some((item) => item.url === listing.image)) {
+      gallery.unshift({ url: listing.image, mediaType: "image" });
+    }
+    return { ...listing, media: gallery };
+  });
 }
 
 async function serveStatic(pathname, response) {
@@ -392,9 +591,9 @@ async function handle(request, response) {
     const body = await readJson(request);
     const listingId = String(body.listingId || "");
     const listing = db
-      .prepare("SELECT id,status FROM listings WHERE id = ?")
+      .prepare("SELECT id,status,archived FROM listings WHERE id = ?")
       .get(listingId);
-    if (!listing || listing.status !== "available") {
+    if (!listing || listing.archived || listing.status !== "available") {
       json(response, 409, { error: "This plot is no longer available." });
       return;
     }
@@ -426,6 +625,149 @@ async function handle(request, response) {
     });
     return;
   }
+  if (method === "POST" && path === "/api/owner/forgot-password") {
+    const body = await readJson(request);
+    const email =
+      typeof body.email === "string" ? body.email.trim().toLowerCase() : "";
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      json(response, 400, { error: "Enter a valid email address." });
+      return;
+    }
+    const ip = request.socket.remoteAddress || "unknown";
+    const now = Date.now();
+    const attempts = resetRequestAttempts.get(ip) || {
+      count: 0,
+      resetAt: now + 60 * 60 * 1000,
+    };
+    if (attempts.resetAt <= now) {
+      attempts.count = 0;
+      attempts.resetAt = now + 60 * 60 * 1000;
+    }
+    if (attempts.count >= 5) {
+      json(response, 429, {
+        error: "Too many reset attempts. Try again later.",
+      });
+      return;
+    }
+    attempts.count += 1;
+    resetRequestAttempts.set(ip, attempts);
+    if (email !== OWNER_EMAIL) {
+      json(response, 202, {
+        message:
+          "If the address matches the owner account, a verification code will be emailed.",
+      });
+      return;
+    }
+    if (!emailConfigured()) {
+      json(response, 503, {
+        error:
+          "Email delivery is not configured. Set SMTP settings on the server before requesting a code.",
+      });
+      return;
+    }
+    const previous = db
+      .prepare("SELECT sent_at FROM password_reset_codes WHERE email = ?")
+      .get(email);
+    if (previous && now - previous.sent_at < RESET_CODE_COOLDOWN_MS) {
+      json(response, 202, {
+        message:
+          "If the address matches the owner account, a verification code will be emailed.",
+      });
+      return;
+    }
+    const code = String(randomBytes(4).readUInt32BE(0) % 1000000).padStart(
+      6,
+      "0",
+    );
+    try {
+      await sendPasswordResetEmail(email, code);
+    } catch (error) {
+      console.error(
+        "Password reset email delivery failed.",
+        error.code || error.name || "SMTP error",
+      );
+      json(response, 502, {
+        error:
+          "Could not send the verification email. Check the server email settings and try again.",
+      });
+      return;
+    }
+    db.prepare(
+      "INSERT INTO password_reset_codes (email,code_hash,expires_at,attempts,sent_at) VALUES (?,?,?,?,?) ON CONFLICT(email) DO UPDATE SET code_hash=excluded.code_hash,expires_at=excluded.expires_at,attempts=0,sent_at=excluded.sent_at",
+    ).run(email, resetCodeHash(email, code), now + RESET_CODE_TTL_MS, 0, now);
+    json(response, 202, {
+      message:
+        "If the address matches the owner account, a verification code will be emailed.",
+    });
+    return;
+  }
+  if (method === "POST" && path === "/api/owner/reset-password") {
+    const body = await readJson(request);
+    const email =
+      typeof body.email === "string" ? body.email.trim().toLowerCase() : "";
+    const code = typeof body.code === "string" ? body.code.trim() : "";
+    const newPassword =
+      typeof body.newPassword === "string" ? body.newPassword : "";
+    if (
+      email !== OWNER_EMAIL ||
+      !/^\d{6}$/.test(code) ||
+      newPassword.length < 10 ||
+      newPassword.length > 256
+    ) {
+      json(response, 400, {
+        error:
+          "Enter the emailed six-digit code and a new password of at least 10 characters.",
+      });
+      return;
+    }
+    const reset = db
+      .prepare(
+        "SELECT code_hash,expires_at,attempts FROM password_reset_codes WHERE email = ?",
+      )
+      .get(email);
+    if (
+      !reset ||
+      reset.expires_at <= Date.now() ||
+      reset.attempts >= RESET_CODE_MAX_ATTEMPTS
+    ) {
+      db.prepare("DELETE FROM password_reset_codes WHERE email = ?").run(email);
+      json(response, 400, {
+        error: "The code is missing or expired. Request a new code.",
+      });
+      return;
+    }
+    const expected = Buffer.from(reset.code_hash, "hex");
+    const candidate = Buffer.from(resetCodeHash(email, code), "hex");
+    if (
+      expected.length !== candidate.length ||
+      !timingSafeEqual(expected, candidate)
+    ) {
+      db.prepare(
+        "UPDATE password_reset_codes SET attempts = attempts + 1 WHERE email = ?",
+      ).run(email);
+      json(response, 400, { error: "That verification code is incorrect." });
+      return;
+    }
+    const salt = randomBytes(32).toString("hex");
+    const passwordHash = scryptSync(newPassword, salt, 64).toString("hex");
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      db.prepare(
+        "UPDATE owner_credentials SET password_salt=?,password_hash=?,updated_at=? WHERE id=1",
+      ).run(salt, passwordHash, Date.now());
+      db.prepare("DELETE FROM password_reset_codes WHERE email=?").run(email);
+      db.prepare("DELETE FROM sessions").run();
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+    json(response, 200, {
+      ok: true,
+      message: "Password updated. Sign in with your new password.",
+    });
+    return;
+  }
   if (method === "POST" && path === "/api/owner/login") {
     const ip = request.socket.remoteAddress || "unknown";
     const now = Date.now();
@@ -445,8 +787,18 @@ async function handle(request, response) {
     }
     const body = await readJson(request);
     const candidate = typeof body.password === "string" ? body.password : "";
-    const candidateHash = scryptSync(candidate, PASSWORD_SALT, 64);
-    if (!timingSafeEqual(candidateHash, configuredPasswordHash)) {
+    const credentials = db
+      .prepare(
+        "SELECT password_salt,password_hash FROM owner_credentials WHERE id=1",
+      )
+      .get();
+    const candidateHash = scryptSync(
+      candidate.slice(0, 256),
+      credentials.password_salt,
+      64,
+    );
+    const storedHash = Buffer.from(credentials.password_hash, "hex");
+    if (candidate.length > 256 || !timingSafeEqual(candidateHash, storedHash)) {
       attempts.count += 1;
       loginAttempts.set(ip, attempts);
       json(response, 401, { error: "Incorrect password." });
@@ -492,9 +844,10 @@ async function handle(request, response) {
   if (method === "POST" && path === "/api/owner/listings") {
     const body = await readJson(request);
     const listing = listingInput(body);
-    const image = body.imageData
-      ? await saveImage(body.imageData)
-      : body.imageUrl;
+    const uploadedMedia = await saveMediaFiles(body);
+    const image =
+      uploadedMedia.find((item) => item.mediaType === "image")?.url ||
+      body.imageUrl;
     if (
       typeof image !== "string" ||
       !(image.startsWith("/uploads/") || /^https:\/\//i.test(image))
@@ -523,8 +876,9 @@ async function handle(request, response) {
       now,
       now,
     );
+    saveListingMedia(id, uploadedMedia, image);
     json(response, 201, {
-      listing: db.prepare("SELECT * FROM listings WHERE id = ?").get(id),
+      listing: publicListings().find((item) => item.id === id),
     });
     return;
   }
@@ -537,27 +891,71 @@ async function handle(request, response) {
       return;
     }
     const result = db
-      .prepare("UPDATE listings SET status = ?, updated_at = ? WHERE id = ?")
+      .prepare(
+        "UPDATE listings SET status = ?, updated_at = ? WHERE id = ? AND archived=0",
+      )
       .run(body.status, Date.now(), id);
     if (!result.changes) json(response, 404, { error: "Plot not found." });
     else json(response, 200, { ok: true });
     return;
   }
   const listingRoute = path.match(/^\/api\/owner\/listings\/([^/]+)$/);
+  if (method === "DELETE" && listingRoute) {
+    const id = decodeURIComponent(listingRoute[1]);
+    const result = db
+      .prepare(
+        "UPDATE listings SET archived=1,updated_at=? WHERE id=? AND archived=0",
+      )
+      .run(Date.now(), id);
+    if (!result.changes) json(response, 404, { error: "Plot not found." });
+    else
+      json(response, 200, {
+        ok: true,
+        message: "Listing removed. Existing booking history is retained.",
+      });
+    return;
+  }
   if (method === "PUT" && listingRoute) {
     const id = decodeURIComponent(listingRoute[1]);
     const body = await readJson(request);
     const listing = listingInput(body);
     const current = db
-      .prepare("SELECT image FROM listings WHERE id = ?")
+      .prepare("SELECT image FROM listings WHERE id = ? AND archived=0")
       .get(id);
     if (!current) {
       json(response, 404, { error: "Plot not found." });
       return;
     }
+    const storedMediaCount = db
+      .prepare("SELECT COUNT(*) AS count FROM listing_media WHERE listing_id=?")
+      .get(id).count;
+    const existingMediaCount = storedMediaCount || (current.image ? 1 : 0);
+    const incomingMediaCount =
+      (Array.isArray(body.mediaFiles) ? body.mediaFiles.length : 0) +
+      (body.imageData ? 1 : 0);
+    const coverAddsMedia =
+      body.imageUrl &&
+      body.imageUrl !== current.image &&
+      !db
+        .prepare("SELECT id FROM listing_media WHERE listing_id=? AND url=?")
+        .get(id, body.imageUrl)
+        ? 1
+        : 0;
+    if (
+      existingMediaCount + incomingMediaCount + coverAddsMedia >
+      MAX_MEDIA_FILES
+    ) {
+      json(response, 400, {
+        error: `A listing can have up to ${MAX_MEDIA_FILES} photos/videos. Remove some before adding more.`,
+      });
+      return;
+    }
+    const uploadedMedia = await saveMediaFiles(body);
     let image = current.image;
-    if (body.imageData) image = await saveImage(body.imageData);
-    else if (body.imageUrl) image = body.imageUrl;
+    if (body.imageUrl) image = body.imageUrl;
+    else if (uploadedMedia.some((item) => item.mediaType === "image")) {
+      image = uploadedMedia.find((item) => item.mediaType === "image").url;
+    }
     if (
       typeof image !== "string" ||
       !(image.startsWith("/uploads/") || /^https:\/\//i.test(image))
@@ -580,8 +978,9 @@ async function handle(request, response) {
       Date.now(),
       id,
     );
+    saveListingMedia(id, uploadedMedia, image);
     json(response, 200, {
-      listing: db.prepare("SELECT * FROM listings WHERE id = ?").get(id),
+      listing: publicListings().find((item) => item.id === id),
     });
     return;
   }
@@ -619,7 +1018,7 @@ async function handle(request, response) {
       if (body.status === "accepted") {
         const changed = db
           .prepare(
-            "UPDATE listings SET status='reserved',updated_at=? WHERE id=? AND status='available'",
+            "UPDATE listings SET status='reserved',updated_at=? WHERE id=? AND status='available' AND archived=0",
           )
           .run(Date.now(), booking.listing_id);
         if (!changed.changes) {

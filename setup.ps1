@@ -23,7 +23,7 @@ $secretBytes = New-Object byte[] 32
 $random.GetBytes($secretBytes)
 $random.Dispose()
 $sessionSecret = [BitConverter]::ToString($secretBytes).Replace('-', '').ToLowerInvariant()
-$content = "OWNER_PASSWORD=$ownerPassword`nSESSION_SECRET=$sessionSecret`nPORT=3000`nDATA_DIR=./data`nUPLOADS_DIR=./uploads`n"
+$content = "OWNER_PASSWORD=$ownerPassword`nOWNER_EMAIL=vjvijay2025@gmail.com`nSESSION_SECRET=$sessionSecret`nSMTP_HOST=smtp.gmail.com`nSMTP_PORT=465`nSMTP_SECURE=true`nSMTP_USER=vjvijay2025@gmail.com`nSMTP_PASSWORD=`nMAIL_FROM=Kakinada Plots <vjvijay2025@gmail.com>`nPORT=3000`nDATA_DIR=./data`nUPLOADS_DIR=./uploads`n"
 $encoding = New-Object System.Text.UTF8Encoding($false)
 [System.IO.File]::WriteAllText($envPath, $content, $encoding)
 $ownerPassword = $null
