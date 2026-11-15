@@ -1,0 +1,6 @@
+[build]
+  publish = "public"
+
+# This publishes the static customer/owner interface so /styles.css and /app.js
+# resolve from the deployed site root. The Node API in server.mjs still needs a
+# separate Node.js host; static Netlify hosting does not run that server.

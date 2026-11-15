@@ -34,3 +34,5 @@ The owner recovery code is addressed to `OWNER_EMAIL` (default: `vjvijay2025@gma
 Deploy the application folder containing `server.mjs` to a Node.js host with Node 22.5 or later. Set `OWNER_PASSWORD`, `OWNER_EMAIL`, `SESSION_SECRET`, all required SMTP settings, `NODE_ENV=production`, `PORT` as required, and persistent `DATA_DIR` / `UPLOADS_DIR` volumes. Use HTTPS at the hosting provider or reverse proxy. The `.env` file is for local development and must not be committed.
 
 A static-only host such as GitHub Pages cannot run this backend. The server serves the customer and owner interface from `public/`; do not deploy that folder alone if you need shared bookings and secured owner management.
+
+Netlify note: `netlify.toml` sets `public` as the publish directory so the stylesheet and browser script resolve from the root of a static deploy. This only publishes the UI. `/api/*`, SQLite storage, uploads, owner login, bookings, and email reset require the Node server from this folder to be hosted separately with persistent storage; a static Netlify deploy alone will not provide those features.
