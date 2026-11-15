@@ -447,20 +447,28 @@ function saveListingMedia(listingId, mediaFiles, imageUrl, firstImageUrl = "") {
     items.unshift({ url: imageUrl, mediaType: "image" });
   if (firstImageUrl && !items.some((item) => item.url === firstImageUrl))
     items.unshift({ url: firstImageUrl, mediaType: "image" });
+  const existingUrls = new Set(
+    db
+      .prepare("SELECT url FROM listing_media WHERE listing_id=?")
+      .all(listingId)
+      .map((item) => item.url),
+  );
   const insert = db.prepare(
     "INSERT INTO listing_media (id,listing_id,url,media_type,position,created_at) VALUES (?,?,?,?,?,?)",
   );
   const now = Date.now();
-  items.forEach((item, index) =>
-    insert.run(
-      randomBytes(12).toString("hex"),
-      listingId,
-      item.url,
-      item.mediaType,
-      index,
-      now,
-    ),
-  );
+  items
+    .filter((item) => !existingUrls.has(item.url))
+    .forEach((item, index) =>
+      insert.run(
+        randomBytes(12).toString("hex"),
+        listingId,
+        item.url,
+        item.mediaType,
+        index,
+        now,
+      ),
+    );
 }
 
 function listingInput(body) {
@@ -509,19 +517,19 @@ function publicListings() {
     .all();
   const media = db
     .prepare(
-      "SELECT url,media_type AS mediaType,listing_id AS listingId FROM listing_media ORDER BY position,created_at",
+      "SELECT id,url,media_type AS mediaType,listing_id AS listingId FROM listing_media ORDER BY position,created_at",
     )
     .all();
   const byListing = new Map();
   for (const item of media) {
     const list = byListing.get(item.listingId) || [];
-    list.push({ url: item.url, mediaType: item.mediaType });
+    list.push({ id: item.id, url: item.url, mediaType: item.mediaType });
     byListing.set(item.listingId, list);
   }
   return listings.map((listing) => {
     const gallery = byListing.get(listing.id) || [];
     if (listing.image && !gallery.some((item) => item.url === listing.image)) {
-      gallery.unshift({ url: listing.image, mediaType: "image" });
+      gallery.unshift({ id: null, url: listing.image, mediaType: "image" });
     }
     return { ...listing, media: gallery };
   });
@@ -926,9 +934,30 @@ async function handle(request, response) {
       json(response, 404, { error: "Plot not found." });
       return;
     }
+    const removeMediaIds = Array.isArray(body.removeMediaIds)
+      ? [
+          ...new Set(
+            body.removeMediaIds.filter(
+              (value) =>
+                typeof value === "string" && /^[a-f0-9]{24}$/.test(value),
+            ),
+          ),
+        ]
+      : [];
+    if (removeMediaIds.length > MAX_MEDIA_FILES) {
+      json(response, 400, { error: "Invalid media removal request." });
+      return;
+    }
     const storedMediaCount = db
       .prepare("SELECT COUNT(*) AS count FROM listing_media WHERE listing_id=?")
       .get(id).count;
+    const validRemovals = removeMediaIds.length
+      ? db
+          .prepare(
+            `SELECT id FROM listing_media WHERE listing_id=? AND id IN (${removeMediaIds.map(() => "?").join(",")})`,
+          )
+          .all(id, ...removeMediaIds).length
+      : 0;
     const existingMediaCount = storedMediaCount || (current.image ? 1 : 0);
     const incomingMediaCount =
       (Array.isArray(body.mediaFiles) ? body.mediaFiles.length : 0) +
@@ -942,7 +971,7 @@ async function handle(request, response) {
         ? 1
         : 0;
     if (
-      existingMediaCount + incomingMediaCount + coverAddsMedia >
+      existingMediaCount - validRemovals + incomingMediaCount + coverAddsMedia >
       MAX_MEDIA_FILES
     ) {
       json(response, 400, {
@@ -965,6 +994,35 @@ async function handle(request, response) {
       });
       return;
     }
+    saveListingMedia(id, uploadedMedia, image);
+    const excludeRemoved = removeMediaIds.length
+      ? ` AND id NOT IN (${removeMediaIds.map(() => "?").join(",")})`
+      : "";
+    const coverStillExists = db
+      .prepare(
+        `SELECT id FROM listing_media WHERE listing_id=? AND url=? AND media_type='image'${excludeRemoved}`,
+      )
+      .get(id, image, ...removeMediaIds);
+    if (!coverStillExists) {
+      const nextCover = db
+        .prepare(
+          `SELECT url FROM listing_media WHERE listing_id=? AND media_type='image'${excludeRemoved} ORDER BY position,created_at LIMIT 1`,
+        )
+        .get(id, ...removeMediaIds);
+      if (!nextCover) {
+        json(response, 400, {
+          error:
+            "A listing needs at least one photo. Keep or upload a cover photo.",
+        });
+        return;
+      }
+      image = nextCover.url;
+    }
+    if (removeMediaIds.length) {
+      db.prepare(
+        `DELETE FROM listing_media WHERE listing_id=? AND id IN (${removeMediaIds.map(() => "?").join(",")})`,
+      ).run(id, ...removeMediaIds);
+    }
     db.prepare(
       "UPDATE listings SET title=?,area=?,price=?,size=?,type=?,description=?,image=?,updated_at=? WHERE id=?",
     ).run(
@@ -978,7 +1036,6 @@ async function handle(request, response) {
       Date.now(),
       id,
     );
-    saveListingMedia(id, uploadedMedia, image);
     json(response, 200, {
       listing: publicListings().find((item) => item.id === id),
     });

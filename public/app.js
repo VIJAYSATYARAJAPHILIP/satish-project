@@ -10,6 +10,7 @@ let currentBookingListing = null;
 let ownerUnlocked = false;
 let toastTimer;
 let editingMedia = [];
+let removedMediaIds = [];
 
 const escapeHTML = (value) =>
   String(value ?? "").replace(
@@ -297,6 +298,7 @@ function resetListingForm() {
   $("#image-preview").hidden = true;
   $("#media-preview-list").replaceChildren();
   editingMedia = [];
+  removedMediaIds = [];
 }
 
 function editListing(id) {
@@ -317,6 +319,7 @@ function editListing(id) {
   editingMedia = Array.isArray(plot.media)
     ? plot.media
     : [{ url: plot.image, mediaType: "image" }];
+  removedMediaIds = [];
   $("#image-preview").src = plot.image;
   $("#image-preview").hidden = false;
   renderMediaPreview();
@@ -379,6 +382,24 @@ function renderMediaPreview() {
     const label = document.createElement("span");
     label.textContent = item.mediaType === "video" ? "Video" : "Photo";
     tile.append(media, label);
+    if (item.id) {
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "media-remove";
+      remove.textContent = "×";
+      remove.setAttribute(
+        "aria-label",
+        `Remove ${item.mediaType} from listing`,
+      );
+      remove.addEventListener("click", () => {
+        editingMedia = editingMedia.filter(
+          (existing) => existing.id !== item.id,
+        );
+        removedMediaIds.push(item.id);
+        renderMediaPreview();
+      });
+      tile.append(remove);
+    }
     root.append(tile);
   });
   if (files.length > 0) $("#image-preview").hidden = true;
@@ -411,6 +432,7 @@ async function saveListing(event) {
     )
       throw new Error("Combined photo/video uploads must be under 55 MB.");
     payload.mediaFiles = await Promise.all(selectedFiles.map(fileAsDataUrl));
+    payload.removeMediaIds = removedMediaIds;
     if (!id && !imageUrl && imageFiles.length === 0)
       throw new Error("Add at least one listing photo or enter an image URL.");
     await api(

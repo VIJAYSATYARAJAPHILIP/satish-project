@@ -314,6 +314,30 @@ test("owner can upload multiple photos and videos for one plot", async () => {
   );
   assert.equal(video.status, 200);
   assert.match(video.headers.get("content-type"), /video\/mp4/);
+  const removeCoverId = listing.media.find(
+    (item) => item.url === listing.image,
+  ).id;
+  const removeVideoId = listing.media.find(
+    (item) => item.mediaType === "video",
+  ).id;
+  const edit = await request(`/api/owner/listings/${listing.id}`, {
+    method: "PUT",
+    cookie,
+    body: {
+      title: listing.title,
+      area: listing.area,
+      price: listing.price,
+      size: listing.size,
+      type: listing.type,
+      description: listing.description,
+      removeMediaIds: [removeCoverId, removeVideoId],
+    },
+  });
+  assert.equal(edit.status, 200);
+  const { listing: updated } = await edit.json();
+  assert.equal(updated.media.length, 1);
+  assert.equal(updated.media[0].mediaType, "image");
+  assert.equal(updated.image, updated.media[0].url);
 });
 
 test("owner can remove a post without deleting its booking history", async () => {
